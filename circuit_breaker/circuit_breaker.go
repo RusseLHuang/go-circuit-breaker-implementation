@@ -43,7 +43,7 @@ func (c *CircuitBreaker) Go(
 
 	if err != nil {
 		log.Println("Err nil")
-		atomic.AddInt32(&(c.Command[commandName].FailedCount), 1)
+		atomic.AddInt32(&(command.FailedCount), 1)
 	}
 
 	if atomic.LoadInt32(&command.FailedCount) > command.FailedThreshold {
