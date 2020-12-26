@@ -7,17 +7,26 @@ import (
 	"time"
 )
 
+const Closed = "Closed"
+const Open = "Open"
+const HalfOpen = "HalfOpen"
+
 type CircuitBreaker struct {
 	Command map[string]*Command
 }
 
 type Command struct {
-	Request         int
-	FailedCount     int32
-	FailedThreshold int32
-	TimeStart       time.Time
-	TimeWithin      time.Duration
-	FallbackHandler func()
+	Request          int
+	FailedCount      int32
+	FailedThreshold  int32
+	TimeStart        time.Time
+	TimeWithin       time.Duration
+	RefreshInterval  time.Duration
+	HalfOpenRequest  int32
+	RequestHalfOpen  chan bool
+	HalfOpenResponse chan bool
+	FallbackHandler  func()
+	Status           string
 }
 
 func (c *CircuitBreaker) SetCommand(
@@ -30,7 +39,7 @@ func (c *CircuitBreaker) SetCommand(
 
 func (c *CircuitBreaker) Go(
 	commandName string,
-	externalFn func() error,
+	externalFn func(num ...*int) error,
 ) bool {
 	command, ok := c.Command[commandName]
 
@@ -39,14 +48,14 @@ func (c *CircuitBreaker) Go(
 		return false
 	}
 
-	err := externalFn()
-
-	if err != nil {
-		log.Println("Err nil")
-		atomic.AddInt32(&(command.FailedCount), 1)
+	status := command.Status
+	select {
+	case <-command.RequestHalfOpen:
+		status = HalfOpen
+	default:
 	}
 
-	if atomic.LoadInt32(&command.FailedCount) > command.FailedThreshold {
+	if status == Open {
 		log.Println("Failed Threshold reached")
 
 		if command.FallbackHandler != nil {
@@ -54,6 +63,44 @@ func (c *CircuitBreaker) Go(
 		}
 
 		return false
+	}
+
+	err := externalFn()
+
+	if err != nil {
+		log.Println("Err nil")
+		atomic.AddInt32(&(command.FailedCount), 1)
+
+	}
+
+	if status == HalfOpen {
+		if err != nil {
+			command.HalfOpenResponse <- false
+		} else {
+			command.HalfOpenResponse <- true
+		}
+	}
+
+	if atomic.LoadInt32(&command.FailedCount) >= command.FailedThreshold {
+		command.Status = Open
+
+		ticker := time.NewTicker(command.RefreshInterval)
+		go func() {
+			for {
+				<-ticker.C
+				log.Println("Half open ticker tick")
+
+				command.RequestHalfOpen <- true
+
+				isCloseCircuitBreaker := <-command.HalfOpenResponse
+
+				if isCloseCircuitBreaker == true {
+					break
+				}
+
+				atomic.AddInt32(&command.HalfOpenRequest, 1)
+			}
+		}()
 	}
 
 	return true
@@ -69,4 +116,18 @@ func GetInstance() *CircuitBreaker {
 		}
 	})
 	return circuitBreaker
+}
+
+func NewCommand(
+	failedThrehold int,
+	timeWithin time.Duration,
+	refreshInterval time.Duration,
+) Command {
+	return Command{
+		FailedThreshold:  1,
+		TimeWithin:       time.Duration(60 * time.Second),
+		RefreshInterval:  refreshInterval,
+		RequestHalfOpen:  make(chan bool),
+		HalfOpenResponse: make(chan bool),
+	}
 }
