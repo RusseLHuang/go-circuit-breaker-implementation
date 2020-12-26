@@ -9,11 +9,11 @@ import (
 func TestSuccessUnderFailedThreshold(t *testing.T) {
 
 	cb := GetInstance()
-	command := Command{
-		FailedThreshold: 5,
-		TimeWithin:      time.Duration(60 * time.Second),
-		RefreshInterval: time.Duration(10 * time.Second),
-	}
+	command := NewCommand(
+		5,
+		time.Duration(60*time.Second),
+		time.Duration(10*time.Second),
+	)
 
 	cb.SetCommand("mycommand", command)
 
@@ -32,11 +32,11 @@ func TestSuccessUnderFailedThreshold(t *testing.T) {
 func TestFailedOverFailedThreshold(t *testing.T) {
 
 	cb := GetInstance()
-	command := Command{
-		FailedThreshold: 5,
-		TimeWithin:      time.Duration(60 * time.Second),
-		RefreshInterval: time.Duration(10 * time.Second),
-	}
+	command := NewCommand(
+		5,
+		time.Duration(60*time.Second),
+		time.Duration(10*time.Second),
+	)
 
 	funcCalled := 0
 
@@ -59,13 +59,13 @@ func TestFailedOverFailedThreshold(t *testing.T) {
 
 }
 
-func TestCircuitBreakerFailedCountShouldRefresh(t *testing.T) {
+func TestCommandHandlerInvokedAfterCircuitBreakerClosed(t *testing.T) {
 
 	cb := GetInstance()
 	command := NewCommand(
-		5,
+		2,
 		time.Duration(3*time.Second),
-		time.Duration(10*time.Second),
+		time.Duration(3*time.Second),
 	)
 
 	cb.SetCommand("mycommand", command)
@@ -78,7 +78,7 @@ func TestCircuitBreakerFailedCountShouldRefresh(t *testing.T) {
 		return errors.New("Test Failed")
 	})
 
-	failedCount := cb.Command["mycommand"].FailedCount
+	failedCount := cb.Command["mycommand"].GetCurrentFailedCount()
 	if failedCount != 2 {
 		t.Fatalf("Failed count should be two when previous two request is failed")
 	}
@@ -89,9 +89,20 @@ func TestCircuitBreakerFailedCountShouldRefresh(t *testing.T) {
 		return nil
 	})
 
-	failedCountAfterRefresh := cb.Command["mycommand"].FailedCount
+	time.Sleep(time.Duration(1 * time.Second))
+
+	functionCalled := 0
+	failedCountAfterRefresh := cb.Command["mycommand"].GetCurrentFailedCount()
+	_ = cb.Go("mycommand", func(num ...*int) error {
+		functionCalled++
+		return nil
+	})
+
+	if functionCalled != 1 {
+		t.Fatalf("Command Handler should be called after circuit breaker is closed")
+	}
 	if failedCountAfterRefresh != 0 {
-		t.Fatalf("Failed count should refresh to zero when failed threhold has not been reached yet after time within period")
+		t.Fatalf("Command Failed Count should refresh after circuit breaker is closed")
 	}
 }
 
@@ -133,6 +144,56 @@ func TestSuccessOverRefreshInterval(t *testing.T) {
 
 	if res3 != true && normalFnCall != 1 {
 		t.Fatalf("Should have been refresh")
+	}
+
+}
+
+func TestHalfOpenConcurrency(t *testing.T) {
+
+	cb := GetInstance()
+	refreshInterval := time.Duration(3 * time.Second)
+	command := NewCommand(
+		1,
+		time.Duration(60*time.Second),
+		refreshInterval,
+	)
+
+	cb.SetCommand("mycommand", command)
+
+	res1 := make(chan bool)
+	res2 := make(chan bool)
+
+	_ = cb.Go("mycommand", func(num ...*int) error {
+		return errors.New("Test Failed")
+	})
+
+	functionCall := 0
+
+	time.Sleep(time.Duration(4 * time.Second))
+
+	go func() {
+		commandResponse := cb.Go("mycommand", func(num ...*int) error {
+			functionCall++
+			return nil
+		})
+
+		res1 <- commandResponse
+	}()
+
+	go func() {
+		commandResponse := cb.Go("mycommand", func(num ...*int) error {
+			functionCall++
+			return nil
+		})
+
+		res2 <- commandResponse
+	}()
+
+	<-res1
+	<-res2
+
+	if functionCall > 1 {
+		t.Fatalf("Should only one request allowed to check external function is good or not")
 	}
 
 }

@@ -16,7 +16,6 @@ type CircuitBreaker struct {
 }
 
 type Command struct {
-	Request          int
 	FailedCount      int32
 	FailedThreshold  int32
 	TimeStart        time.Time
@@ -27,37 +26,43 @@ type Command struct {
 	HalfOpenResponse chan bool
 	FallbackHandler  func()
 	Status           string
+	StatusLocker     *sync.Mutex
 }
 
 func (c *Command) Refresh() {
 	c.TimeStart = time.Now()
-	c.FailedCount = 0
+	atomic.StoreInt32(&c.FailedCount, 0)
 }
 
-func (c *Command) IsRefreshTime() bool {
+func (c *Command) IsTimeToRefresh() bool {
 	return time.Now().Unix() > c.TimeStart.Add(c.TimeWithin).Unix()
+}
+
+func (c *Command) GetCurrentFailedCount() int32 {
+	return atomic.LoadInt32(&c.FailedCount)
 }
 
 func (c *CircuitBreaker) SetCommand(
 	commandName string,
 	command Command,
 ) {
-
 	c.Command[commandName] = &command
 }
 
 func (c *CircuitBreaker) Go(
 	commandName string,
-	externalFn func(num ...*int) error,
+	commandHandler func(num ...*int) error,
 ) bool {
 	command, ok := c.Command[commandName]
+	command.StatusLocker.Lock()
+	defer command.StatusLocker.Unlock()
 
 	if ok != true {
 		log.Println("Command not found")
 		return false
 	}
 
-	if command.IsRefreshTime() {
+	if command.IsTimeToRefresh() {
 		command.Refresh()
 	}
 
@@ -79,7 +84,7 @@ func (c *CircuitBreaker) Go(
 		return false
 	}
 
-	err := externalFn()
+	err := commandHandler()
 
 	if err != nil {
 		log.Println("Err nil")
@@ -92,31 +97,40 @@ func (c *CircuitBreaker) Go(
 		} else {
 			command.HalfOpenResponse <- true
 		}
+
+		return false
 	}
 
 	if atomic.LoadInt32(&command.FailedCount) >= command.FailedThreshold {
+		log.Println("Circuit Breaker Opened")
 		command.Status = Open
-
 		ticker := time.NewTicker(command.RefreshInterval)
-		go func() {
-			for {
-				<-ticker.C
-				log.Println("Half open ticker tick")
-
-				command.RequestHalfOpen <- true
-
-				isCloseCircuitBreaker := <-command.HalfOpenResponse
-
-				if isCloseCircuitBreaker == true {
-					break
-				}
-
-				atomic.AddInt32(&command.HalfOpenRequest, 1)
-			}
-		}()
+		go initHalfOpenHandler(ticker, command)
 	}
 
 	return true
+}
+
+func initHalfOpenHandler(ticker *time.Ticker, command *Command) {
+	for {
+		<-ticker.C
+
+		log.Println("Half open ticker tick")
+
+		command.RequestHalfOpen <- true
+
+		isCloseCircuitBreaker := <-command.HalfOpenResponse
+
+		if isCloseCircuitBreaker == true {
+			log.Println("Circuit Breaker Closed")
+
+			command.StatusLocker.Lock()
+			command.Status = Closed
+			atomic.StoreInt32(&command.FailedCount, 0)
+			command.StatusLocker.Unlock()
+			return
+		}
+	}
 }
 
 var circuitBreaker *CircuitBreaker
@@ -142,5 +156,6 @@ func NewCommand(
 		RefreshInterval:  refreshInterval,
 		RequestHalfOpen:  make(chan bool),
 		HalfOpenResponse: make(chan bool),
+		StatusLocker:     &sync.Mutex{},
 	}
 }
