@@ -29,6 +29,15 @@ type Command struct {
 	Status           string
 }
 
+func (c *Command) Refresh() {
+	c.TimeStart = time.Now()
+	c.FailedCount = 0
+}
+
+func (c *Command) IsRefreshTime() bool {
+	return time.Now().Unix() > c.TimeStart.Add(c.TimeWithin).Unix()
+}
+
 func (c *CircuitBreaker) SetCommand(
 	commandName string,
 	command Command,
@@ -48,11 +57,16 @@ func (c *CircuitBreaker) Go(
 		return false
 	}
 
-	status := command.Status
+	if command.IsRefreshTime() {
+		command.Refresh()
+	}
+
+	var status string
 	select {
 	case <-command.RequestHalfOpen:
 		status = HalfOpen
 	default:
+		status = command.Status
 	}
 
 	if status == Open {
@@ -70,7 +84,6 @@ func (c *CircuitBreaker) Go(
 	if err != nil {
 		log.Println("Err nil")
 		atomic.AddInt32(&(command.FailedCount), 1)
-
 	}
 
 	if status == HalfOpen {
@@ -119,13 +132,13 @@ func GetInstance() *CircuitBreaker {
 }
 
 func NewCommand(
-	failedThrehold int,
+	failedThrehold int32,
 	timeWithin time.Duration,
 	refreshInterval time.Duration,
 ) Command {
 	return Command{
-		FailedThreshold:  1,
-		TimeWithin:       time.Duration(60 * time.Second),
+		FailedThreshold:  failedThrehold,
+		TimeWithin:       timeWithin,
 		RefreshInterval:  refreshInterval,
 		RequestHalfOpen:  make(chan bool),
 		HalfOpenResponse: make(chan bool),

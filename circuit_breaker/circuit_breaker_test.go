@@ -59,6 +59,42 @@ func TestFailedOverFailedThreshold(t *testing.T) {
 
 }
 
+func TestCircuitBreakerFailedCountShouldRefresh(t *testing.T) {
+
+	cb := GetInstance()
+	command := NewCommand(
+		5,
+		time.Duration(3*time.Second),
+		time.Duration(10*time.Second),
+	)
+
+	cb.SetCommand("mycommand", command)
+
+	_ = cb.Go("mycommand", func(num ...*int) error {
+		return errors.New("Test Failed")
+	})
+
+	_ = cb.Go("mycommand", func(num ...*int) error {
+		return errors.New("Test Failed")
+	})
+
+	failedCount := cb.Command["mycommand"].FailedCount
+	if failedCount != 2 {
+		t.Fatalf("Failed count should be two when previous two request is failed")
+	}
+
+	time.Sleep(time.Duration(4 * time.Second))
+
+	_ = cb.Go("mycommand", func(num ...*int) error {
+		return nil
+	})
+
+	failedCountAfterRefresh := cb.Command["mycommand"].FailedCount
+	if failedCountAfterRefresh != 0 {
+		t.Fatalf("Failed count should refresh to zero when failed threhold has not been reached yet after time within period")
+	}
+}
+
 func TestSuccessOverRefreshInterval(t *testing.T) {
 
 	cb := GetInstance()
